@@ -79,7 +79,7 @@ def parse_arguments():
     # ----------------- BaseModelArguments ----------------- #
     parser.add_argument("--model_names", nargs="+", default=None, help="List of preset model names to use (e.g. ESM2-8). Mutually exclusive with --model_paths/--model_types.")
     parser.add_argument("--model_paths", nargs="+", default=None, help="List of model paths (HuggingFace or local). Must be paired with --model_types. Mutually exclusive with --model_names.")
-    parser.add_argument("--model_types", nargs="+", default=None, help="List of model type keywords paired with --model_paths (e.g. esm2, esmc, protbert, prott5, ankh, glm, dplm, dplm2, protclm, onehot, amplify, e1, vec2vec, calm, custom, random).")
+    parser.add_argument("--model_types", nargs="+", default=None, help="List of model type keywords paired with --model_paths (e.g. atlas, esm2, esmc, protbert, prott5, ankh, glm, dplm, dplm2, protclm, onehot, amplify, e1, vec2vec, calm, custom, random).")
     parser.add_argument("--model_dtype", type=str, choices=["fp32", "fp16", "bf16", "float32", "float16", "bfloat16"], default="bf16", help="Data type for loading base models.")
     parser.add_argument("--use_xformers", action="store_true", help="Use xformers memory-efficient attention for AMPLIFY models.")
 
@@ -275,7 +275,7 @@ def parse_arguments():
     elif args.model_types is not None:
         assert args.model_paths is not None, "--model_paths is required when --model_types is provided."
     if args.model_names is None and args.model_paths is None:
-        args.model_names = ["ESM2-8"]
+        args.model_names = ["Atlas-PPI-auto"]
 
     assert args.probe_type == "linear" or args.matrix_embed, "When probe_type is not linear, --matrix_embed must be True."
 

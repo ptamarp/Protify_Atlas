@@ -1,6 +1,8 @@
 
 
 all_presets_with_paths = {
+    # Atlas PPI model (from atlas.py)
+    'Atlas-PPI-auto': 'GleghornLab/Atlas-PPI-auto',
     # ESM2 models (from esm2.py)
     'ESM2-8': 'Synthyra/ESM2-8M',
     'ESM2-35': 'Synthyra/ESM2-35M',
@@ -80,6 +82,7 @@ all_presets_with_paths = {
 
 
 currently_supported_models = [
+    'Atlas-PPI-auto',
     'ESM2-8',
     'ESM2-35',
     'ESM2-150',
@@ -129,6 +132,7 @@ currently_supported_models = [
 ]
 
 standard_models = [
+    'Atlas-PPI-auto',
     'AMPLIFY-120',
     'AMPLIFY-350',
     'GLM2-150',
