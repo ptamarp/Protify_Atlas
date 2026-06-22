@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional
 
+from .atlas import is_atlas_ppi_model_name
 from .supported_models import currently_supported_models, standard_models, experimental_models
 
 
@@ -40,6 +41,9 @@ class BaseModelArguments:
 
 
 def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_path: str = None):
+    if is_atlas_ppi_model_name(model_name):
+        from .atlas import build_atlas_ppi_model
+        return build_atlas_ppi_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
     if 'vec2vec' in model_name.lower():
         from .vec2vec import build_vec2vec_model
         return build_vec2vec_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
@@ -97,6 +101,11 @@ def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_p
 
 
 def get_base_model_for_training(model_name: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype=None, model_path: str = None):
+    if is_atlas_ppi_model_name(model_name):
+        raise ValueError(
+            "Atlas-PPI-auto is supported for precomputed embedding probes only; "
+            "full fine-tuning and hybrid training are not supported."
+        )
     if 'esm2' in model_name.lower() or 'dsm' in model_name.lower():
         from .esm2 import get_esm2_for_training
         return get_esm2_for_training(model_name, tokenwise, num_labels, hybrid, dtype=dtype, model_path=model_path)
@@ -138,6 +147,9 @@ def get_base_model_for_training(model_name: str, tokenwise: bool = False, num_la
 
 
 def get_tokenizer(model_name: str, model_path: str = None):
+    if is_atlas_ppi_model_name(model_name):
+        from .atlas import get_atlas_ppi_tokenizer
+        return get_atlas_ppi_tokenizer(model_name, model_path=model_path)
     if 'custom' in model_name.lower():
         from .custom_model import build_custom_tokenizer
         assert model_path is not None, "model_path is required for custom models. Use --model_paths and --model_types custom."
