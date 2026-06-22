@@ -275,7 +275,7 @@ def parse_arguments():
     elif args.model_types is not None:
         assert args.model_paths is not None, "--model_paths is required when --model_types is provided."
     if args.model_names is None and args.model_paths is None:
-        args.model_names = ["ESM2-8"]
+        args.model_names = ["Atlas-PPI-auto"]
 
     assert args.probe_type == "linear" or args.matrix_embed, "When probe_type is not linear, --matrix_embed must be True."
 
