@@ -21,8 +21,6 @@ try:
     from data.dataset_classes import SimpleProteinDataset
     from base_models.atlas import (
         ATLAS_EMBEDDING_KINDS,
-        ATLAS_MATRIX_EMBEDDING_KINDS,
-        ATLAS_POOLED_EMBEDDING_KINDS,
         atlas_embedding_kind,
         atlas_kind_is_matrix,
         is_atlas_ppi_model_name,
@@ -35,8 +33,6 @@ except ImportError:
     from .data.dataset_classes import SimpleProteinDataset
     from .base_models.atlas import (
         ATLAS_EMBEDDING_KINDS,
-        ATLAS_MATRIX_EMBEDDING_KINDS,
-        ATLAS_POOLED_EMBEDDING_KINDS,
         atlas_embedding_kind,
         atlas_kind_is_matrix,
         is_atlas_ppi_model_name,
@@ -447,53 +443,31 @@ class Embedder:
             self,
             batch_embeddings: Any,
             seqs: List[str],
-            matrix_embed: Optional[bool] = None,
             embedding_kind: str = "unknown",
     ) -> List[torch.Tensor]:
-        matrix_embed = self.matrix_embed if matrix_embed is None else matrix_embed
         if isinstance(batch_embeddings, torch.Tensor):
-            if len(seqs) == 1 and (batch_embeddings.ndim == 1 or batch_embeddings.shape[0] != 1):
+            if batch_embeddings.ndim > 0 and batch_embeddings.shape[0] == len(seqs):
+                split = [batch_embeddings[i] for i in range(len(seqs))]
+            elif len(seqs) == 1:
                 split = [batch_embeddings]
             else:
-                assert batch_embeddings.shape[0] == len(seqs), (
-                    f"Atlas returned batch size {batch_embeddings.shape[0]} for {len(seqs)} sequences"
+                raise AssertionError(
+                    f"Atlas {embedding_kind} returned shape {tuple(batch_embeddings.shape)} "
+                    f"for {len(seqs)} sequences; first dimension must match batch size."
                 )
-                split = [batch_embeddings[i] for i in range(len(seqs))]
         elif isinstance(batch_embeddings, (list, tuple)):
             assert len(batch_embeddings) == len(seqs), (
-                f"Atlas returned {len(batch_embeddings)} embeddings for {len(seqs)} sequences"
+                f"Atlas {embedding_kind} returned {len(batch_embeddings)} embeddings for {len(seqs)} sequences"
             )
             split = [torch.as_tensor(embedding) for embedding in batch_embeddings]
         else:
-            raise TypeError(f"Unsupported Atlas embedding return type: {type(batch_embeddings)!r}")
+            raise TypeError(f"Unsupported Atlas {embedding_kind} embedding return type: {type(batch_embeddings)!r}")
 
         normalized = []
         for seq, emb in zip(seqs, split):
             if not isinstance(emb, torch.Tensor):
                 emb = torch.as_tensor(emb)
-            emb = emb.detach().cpu()
-            if matrix_embed:
-                if emb.ndim == 1:
-                    # Some Atlas projection views are returned as one vector per
-                    # sequence. Store them as length-1 matrices so matrix-style
-                    # caches stay loadable without re-running the encoder.
-                    emb = emb.unsqueeze(0)
-                if emb.ndim == 3 and emb.shape[0] == 1:
-                    emb = emb.squeeze(0)
-                assert emb.ndim == 2, (
-                    f"Atlas {embedding_kind} matrix embeddings must be 2D after normalization, "
-                    f"got shape {tuple(emb.shape)} for sequence length {len(seq)}"
-                )
-                if emb.shape[0] > len(seq):
-                    emb = emb[:len(seq)]
-            else:
-                if emb.ndim == 2 and emb.shape[0] == 1:
-                    emb = emb.squeeze(0)
-                assert emb.ndim == 1, (
-                    f"Atlas {embedding_kind} pooled embeddings must be 1D after normalization, "
-                    f"got shape {tuple(emb.shape)} for sequence length {len(seq)}"
-                )
-            normalized.append(emb)
+            normalized.append(emb.detach().cpu())
         return normalized
 
     def _derive_atlas_embeddings_by_kind(
@@ -513,7 +487,6 @@ class Embedder:
             normalized[embedding_kind] = self._split_native_embeddings(
                 raw_embeddings_by_kind[embedding_kind],
                 seqs,
-                matrix_embed=atlas_kind_is_matrix(embedding_kind),
                 embedding_kind=embedding_kind,
             )
         return normalized
@@ -542,13 +515,16 @@ class Embedder:
             embeddings_by_kind: Dict[str, List[torch.Tensor]],
     ) -> None:
         for embedding_kind, embeddings in embeddings_by_kind.items():
-            if embedding_kind in ATLAS_POOLED_EMBEDDING_KINDS:
-                stacked = torch.stack([emb.to(self.embed_dtype) for emb in embeddings])
+            embeddings = [emb.to(self.embed_dtype) for emb in embeddings]
+            first_shape = tuple(embeddings[0].shape)
+            same_shape = all(tuple(emb.shape) == first_shape for emb in embeddings)
+            if same_shape:
+                stacked = torch.stack(embeddings)
                 blobs = batch_tensor_to_blobs(stacked)
                 batch_rows = list(zip(seqs, blobs))
             else:
                 batch_rows = [
-                    (seq, tensor_to_embedding_blob(emb.to(self.embed_dtype)))
+                    (seq, tensor_to_embedding_blob(emb))
                     for seq, emb in zip(seqs, embeddings)
                 ]
             writers_by_kind[embedding_kind].write_batch(batch_rows)

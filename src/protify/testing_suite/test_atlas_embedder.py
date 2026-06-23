@@ -192,4 +192,4 @@ def test_atlas_matrix_views_accept_vector_projections(tmp_path):
         path = tmp_path / get_atlas_embedding_filename("Atlas-PPI-auto", embedding_kind)
         cached = torch.load(path, map_location="cpu", weights_only=True)
         expected_width = 4 if embedding_kind == "concat" else 2
-        assert cached["MKT"].shape == (1, expected_width)
+        assert cached["MKT"].shape == (expected_width,)
