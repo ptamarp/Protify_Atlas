@@ -52,6 +52,35 @@ class FakeAtlasModel(nn.Module):
         }
 
 
+class FakeAtlasVectorProjectionModel(nn.Module):
+    atlas_native_embedding = True
+
+    def __init__(self):
+        super().__init__()
+        self.embed_sequences_calls = []
+
+    def embed_sequences(self, sequences, embedding_kind=None):
+        self.embed_sequences_calls.append(embedding_kind)
+        assert embedding_kind is None
+        a = torch.stack([
+            torch.full((2,), float(len(sequence)))
+            for sequence in sequences
+        ])
+        b = torch.stack([
+            torch.full((2,), float(len(sequence) + 10))
+            for sequence in sequences
+        ])
+        concat = torch.cat([a, b], dim=-1)
+        return {
+            "a": a,
+            "b": b,
+            "concat": concat,
+            "pooled_a": a,
+            "pooled_b": b,
+            "pooled_concat": concat,
+        }
+
+
 def test_atlas_embedding_filename_uses_exact_native_kind():
     filename = get_embedding_filename("Atlas-PPI-auto", False, ["pooled_concat"])
 
@@ -133,3 +162,34 @@ def test_atlas_sql_embedder_writes_all_kind_databases_from_one_call(tmp_path):
         with sqlite3.connect(path) as conn:
             count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
         assert count == 1
+
+
+def test_atlas_matrix_views_accept_vector_projections(tmp_path):
+    sequences = ["MKT", "GHHH"]
+    args = EmbeddingArguments(
+        embedding_batch_size=2,
+        matrix_embed=False,
+        embedding_pooling_types=["pooled_concat"],
+        save_embeddings=True,
+        embed_dtype=torch.float32,
+        embedding_save_dir=str(tmp_path),
+    )
+    embedder = Embedder(args, sequences)
+    model = FakeAtlasVectorProjectionModel()
+
+    embeddings = embedder._embed_sequences(
+        sequences,
+        str(tmp_path / get_embedding_filename("Atlas-PPI-auto", False, ["pooled_concat"])),
+        model,
+        tokenizer=None,
+        embeddings_dict={},
+        model_name="Atlas-PPI-auto",
+    )
+
+    assert model.embed_sequences_calls == [None]
+    assert torch.equal(embeddings["MKT"], torch.tensor([3.0, 3.0, 13.0, 13.0]))
+    for embedding_kind in ("a", "b", "concat"):
+        path = tmp_path / get_atlas_embedding_filename("Atlas-PPI-auto", embedding_kind)
+        cached = torch.load(path, map_location="cpu", weights_only=True)
+        expected_width = 4 if embedding_kind == "concat" else 2
+        assert cached["MKT"].shape == (1, expected_width)

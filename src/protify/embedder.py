@@ -448,6 +448,7 @@ class Embedder:
             batch_embeddings: Any,
             seqs: List[str],
             matrix_embed: Optional[bool] = None,
+            embedding_kind: str = "unknown",
     ) -> List[torch.Tensor]:
         matrix_embed = self.matrix_embed if matrix_embed is None else matrix_embed
         if isinstance(batch_embeddings, torch.Tensor):
@@ -472,15 +473,26 @@ class Embedder:
                 emb = torch.as_tensor(emb)
             emb = emb.detach().cpu()
             if matrix_embed:
+                if emb.ndim == 1:
+                    # Some Atlas projection views are returned as one vector per
+                    # sequence. Store them as length-1 matrices so matrix-style
+                    # caches stay loadable without re-running the encoder.
+                    emb = emb.unsqueeze(0)
                 if emb.ndim == 3 and emb.shape[0] == 1:
                     emb = emb.squeeze(0)
-                assert emb.ndim == 2, f"Atlas matrix embeddings must be 2D, got shape {tuple(emb.shape)}"
+                assert emb.ndim == 2, (
+                    f"Atlas {embedding_kind} matrix embeddings must be 2D after normalization, "
+                    f"got shape {tuple(emb.shape)} for sequence length {len(seq)}"
+                )
                 if emb.shape[0] > len(seq):
                     emb = emb[:len(seq)]
             else:
                 if emb.ndim == 2 and emb.shape[0] == 1:
                     emb = emb.squeeze(0)
-                assert emb.ndim == 1, f"Atlas pooled embeddings must be 1D, got shape {tuple(emb.shape)}"
+                assert emb.ndim == 1, (
+                    f"Atlas {embedding_kind} pooled embeddings must be 1D after normalization, "
+                    f"got shape {tuple(emb.shape)} for sequence length {len(seq)}"
+                )
             normalized.append(emb)
         return normalized
 
@@ -502,6 +514,7 @@ class Embedder:
                 raw_embeddings_by_kind[embedding_kind],
                 seqs,
                 matrix_embed=atlas_kind_is_matrix(embedding_kind),
+                embedding_kind=embedding_kind,
             )
         return normalized
 
