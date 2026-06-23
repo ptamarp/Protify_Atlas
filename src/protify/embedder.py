@@ -19,14 +19,28 @@ from huggingface_hub import hf_hub_download
 try:
     from seed_utils import seed_worker, dataloader_generator, get_global_seed
     from data.dataset_classes import SimpleProteinDataset
-    from base_models.atlas import atlas_embedding_kind, is_atlas_ppi_model_name
+    from base_models.atlas import (
+        ATLAS_EMBEDDING_KINDS,
+        ATLAS_MATRIX_EMBEDDING_KINDS,
+        ATLAS_POOLED_EMBEDDING_KINDS,
+        atlas_embedding_kind,
+        atlas_kind_is_matrix,
+        is_atlas_ppi_model_name,
+    )
     from base_models.get_base_models import get_base_model
     from pooler import Pooler
     from utils import torch_load, print_message, maybe_compile, tensor_to_embedding_blob, batch_tensor_to_blobs, _SQLWriter
 except ImportError:
     from .seed_utils import seed_worker, dataloader_generator, get_global_seed
     from .data.dataset_classes import SimpleProteinDataset
-    from .base_models.atlas import atlas_embedding_kind, is_atlas_ppi_model_name
+    from .base_models.atlas import (
+        ATLAS_EMBEDDING_KINDS,
+        ATLAS_MATRIX_EMBEDDING_KINDS,
+        ATLAS_POOLED_EMBEDDING_KINDS,
+        atlas_embedding_kind,
+        atlas_kind_is_matrix,
+        is_atlas_ppi_model_name,
+    )
     from .base_models.get_base_models import get_base_model
     from .pooler import Pooler
     from .utils import (
@@ -79,6 +93,21 @@ def get_embedding_filename(
         pooling_str = '_'.join(sorted(pooling_types))  # Sort for consistency
         base_name = f'{base_name}_{pooling_str}'
     return f'{base_name}.{extension}'
+
+
+def get_atlas_embedding_filename(
+        model_name: str,
+        embedding_kind: str,
+        extension: str = 'pth',
+        hidden_state_index: int = -1,
+) -> str:
+    return get_embedding_filename(
+        model_name,
+        atlas_kind_is_matrix(embedding_kind),
+        [embedding_kind],
+        extension,
+        hidden_state_index,
+    )
 
 
 def _make_embedding_progress(
@@ -284,6 +313,9 @@ class Embedder:
             return {row[0] for row in c.fetchall()}
 
     def _read_embeddings_from_disk(self, model_name: str):
+        if is_atlas_ppi_model_name(model_name):
+            return self._read_atlas_embeddings_from_disk(model_name)
+
         if self.sql:
             filename = get_embedding_filename(
                 model_name,
@@ -330,7 +362,14 @@ class Embedder:
                 return self.all_seqs, save_path, {}
 
     def _native_atlas_embedding_kind(self) -> str:
-        return atlas_embedding_kind(self.matrix_embed, self.pooling_types)
+        try:
+            return atlas_embedding_kind(self.matrix_embed, self.pooling_types)
+        except AssertionError:
+            # Preserve the historical Protify default when Atlas is selected but
+            # no Atlas-specific embedding kind was supplied.
+            if not self.matrix_embed and self.pooling_types in (['mean'], ['mean', 'var'], ['var', 'mean']):
+                return 'pooled_concat'
+            raise
 
     @staticmethod
     def _uses_native_atlas_embeddings(model: Any) -> bool:
@@ -339,7 +378,78 @@ class Embedder:
             or getattr(getattr(model, '_orig_mod', None), 'atlas_native_embedding', False)
         )
 
-    def _split_native_embeddings(self, batch_embeddings: Any, seqs: List[str]) -> List[torch.Tensor]:
+    def _atlas_paths(self, model_name: str, extension: str) -> Dict[str, str]:
+        return {
+            embedding_kind: os.path.join(
+                self.embedding_save_dir,
+                get_atlas_embedding_filename(
+                    model_name,
+                    embedding_kind,
+                    extension,
+                    self.hidden_state_index,
+                ),
+            )
+            for embedding_kind in ATLAS_EMBEDDING_KINDS
+        }
+
+    def _read_atlas_sequences_from_db_paths(self, paths_by_kind: Dict[str, str]) -> Dict[str, Set[str]]:
+        embedded_by_kind = {}
+        for embedding_kind, path in paths_by_kind.items():
+            if os.path.exists(path):
+                conn = sqlite3.connect(path, timeout=30)
+                c = conn.cursor()
+                c.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
+                conn.close()
+                embedded_by_kind[embedding_kind] = self._read_sequences_from_db(path)
+            else:
+                embedded_by_kind[embedding_kind] = set()
+        return embedded_by_kind
+
+    def _read_atlas_embeddings_from_disk(self, model_name: str):
+        requested_kind = self._native_atlas_embedding_kind()
+        extension = 'db' if self.sql else 'pth'
+        paths_by_kind = self._atlas_paths(model_name, extension)
+        requested_path = paths_by_kind[requested_kind]
+
+        if self.sql:
+            embedded_by_kind = self._read_atlas_sequences_from_db_paths(paths_by_kind)
+            to_embed = [
+                seq for seq in self.all_seqs
+                if any(seq not in embedded_by_kind[embedding_kind] for embedding_kind in ATLAS_EMBEDDING_KINDS)
+            ]
+            already_requested = len(embedded_by_kind[requested_kind])
+            print_message(
+                f"Loaded {already_requested} already embedded {requested_kind} Atlas sequences from {requested_path}\n"
+                f"Embedding {len(to_embed)} sequences missing from at least one Atlas cache"
+            )
+            return to_embed, requested_path, {}
+
+        embeddings_dict = {}
+        embeddings_by_kind: Dict[str, Dict[str, torch.Tensor]] = {}
+        for embedding_kind, path in paths_by_kind.items():
+            if os.path.exists(path):
+                print_message(f"Loading Atlas {embedding_kind} embeddings from {path}")
+                embeddings_by_kind[embedding_kind] = torch_load(path)
+                print_message(f"Loaded {len(embeddings_by_kind[embedding_kind])} Atlas {embedding_kind} embeddings")
+            else:
+                print_message(f"No Atlas {embedding_kind} embeddings found in {path}")
+                embeddings_by_kind[embedding_kind] = {}
+
+        to_embed = [
+            seq for seq in self.all_seqs
+            if any(seq not in embeddings_by_kind[embedding_kind] for embedding_kind in ATLAS_EMBEDDING_KINDS)
+        ]
+        embeddings_dict = embeddings_by_kind[requested_kind]
+        self._atlas_existing_embeddings_by_kind = embeddings_by_kind
+        return to_embed, requested_path, embeddings_dict
+
+    def _split_native_embeddings(
+            self,
+            batch_embeddings: Any,
+            seqs: List[str],
+            matrix_embed: Optional[bool] = None,
+    ) -> List[torch.Tensor]:
+        matrix_embed = self.matrix_embed if matrix_embed is None else matrix_embed
         if isinstance(batch_embeddings, torch.Tensor):
             if len(seqs) == 1 and (batch_embeddings.ndim == 1 or batch_embeddings.shape[0] != 1):
                 split = [batch_embeddings]
@@ -361,7 +471,7 @@ class Embedder:
             if not isinstance(emb, torch.Tensor):
                 emb = torch.as_tensor(emb)
             emb = emb.detach().cpu()
-            if self.matrix_embed:
+            if matrix_embed:
                 if emb.ndim == 3 and emb.shape[0] == 1:
                     emb = emb.squeeze(0)
                 assert emb.ndim == 2, f"Atlas matrix embeddings must be 2D, got shape {tuple(emb.shape)}"
@@ -374,6 +484,62 @@ class Embedder:
             normalized.append(emb)
         return normalized
 
+    def _derive_atlas_embeddings_by_kind(
+            self,
+            raw_embeddings_by_kind: Dict[str, Any],
+            seqs: List[str],
+            model: Any,
+    ) -> Dict[str, List[torch.Tensor]]:
+        assert isinstance(raw_embeddings_by_kind, dict), (
+            "Atlas embed_sequences(sequences) must return a dictionary of all embedding views."
+        )
+        missing = set(ATLAS_EMBEDDING_KINDS) - set(raw_embeddings_by_kind)
+        assert not missing, f"Atlas embed_sequences did not return required views: {sorted(missing)}"
+
+        normalized: Dict[str, List[torch.Tensor]] = {}
+        for embedding_kind in ATLAS_EMBEDDING_KINDS:
+            normalized[embedding_kind] = self._split_native_embeddings(
+                raw_embeddings_by_kind[embedding_kind],
+                seqs,
+                matrix_embed=atlas_kind_is_matrix(embedding_kind),
+            )
+        return normalized
+
+    def _open_atlas_sql_writers(self, paths_by_kind: Dict[str, str]) -> Tuple[Dict[str, sqlite3.Connection], Dict[str, _SQLWriter]]:
+        conns = {}
+        writers = {}
+        for embedding_kind, path in paths_by_kind.items():
+            conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+            c = conn.cursor()
+            c.execute('PRAGMA journal_mode=WAL')
+            c.execute('PRAGMA busy_timeout=30000')
+            c.execute('PRAGMA synchronous=OFF')
+            c.execute('PRAGMA cache_size=-64000')
+            c.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
+            writer = _SQLWriter(conn)
+            writer.__enter__()
+            conns[embedding_kind] = conn
+            writers[embedding_kind] = writer
+        return conns, writers
+
+    def _write_atlas_sql_batch(
+            self,
+            writers_by_kind: Dict[str, _SQLWriter],
+            seqs: List[str],
+            embeddings_by_kind: Dict[str, List[torch.Tensor]],
+    ) -> None:
+        for embedding_kind, embeddings in embeddings_by_kind.items():
+            if embedding_kind in ATLAS_POOLED_EMBEDDING_KINDS:
+                stacked = torch.stack([emb.to(self.embed_dtype) for emb in embeddings])
+                blobs = batch_tensor_to_blobs(stacked)
+                batch_rows = list(zip(seqs, blobs))
+            else:
+                batch_rows = [
+                    (seq, tensor_to_embedding_blob(emb.to(self.embed_dtype)))
+                    for seq, emb in zip(seqs, embeddings)
+                ]
+            writers_by_kind[embedding_kind].write_batch(batch_rows)
+
     @torch.inference_mode()
     def _embed_sequences_with_native_atlas(
             self,
@@ -381,56 +547,54 @@ class Embedder:
             save_path: str,
             embedding_model: Any,
             embeddings_dict: Dict[str, torch.Tensor],
+            model_name: str = 'Atlas-PPI-auto',
     ) -> Optional[Dict[str, torch.Tensor]]:
         os.makedirs(self.embedding_save_dir, exist_ok=True)
         model = embedding_model.to(self.device).eval()
-        embedding_kind = self._native_atlas_embedding_kind()
-        print_message(f'Atlas embedding kind: {embedding_kind}')
+        requested_kind = self._native_atlas_embedding_kind()
+        print_message(f'Atlas requested embedding kind: {requested_kind}')
 
         to_embed = sorted(to_embed, key=len, reverse=True)
-        sql_writer = None
-        conn = None
+        extension = 'db' if self.sql else 'pth'
+        paths_by_kind = self._atlas_paths(model_name, extension)
+        conns_by_kind = {}
+        writers_by_kind = {}
+        embeddings_by_kind_cache = getattr(self, '_atlas_existing_embeddings_by_kind', None)
+        if not self.sql and embeddings_by_kind_cache is None:
+            embeddings_by_kind_cache = {}
+            for embedding_kind, path in paths_by_kind.items():
+                embeddings_by_kind_cache[embedding_kind] = torch_load(path) if os.path.exists(path) else {}
+
         if self.sql:
-            conn = sqlite3.connect(save_path, timeout=30, check_same_thread=False)
-            c = conn.cursor()
-            c.execute('PRAGMA journal_mode=WAL')
-            c.execute('PRAGMA busy_timeout=30000')
-            c.execute('PRAGMA synchronous=OFF')
-            c.execute('PRAGMA cache_size=-64000')
-            c.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
-            sql_writer = _SQLWriter(conn)
-            sql_writer.__enter__()
+            conns_by_kind, writers_by_kind = self._open_atlas_sql_writers(paths_by_kind)
 
         total_batches = math.ceil(len(to_embed) / self.batch_size)
         try:
             for batch_start in tqdm(range(0, len(to_embed), self.batch_size), total=total_batches, desc='Embedding batches'):
                 seqs = to_embed[batch_start:batch_start + self.batch_size]
                 with torch.autocast(self.device.type, dtype=self.embed_dtype, enabled=self.autocast):
-                    batch_embeddings = model.embed_sequences(seqs, embedding_kind=embedding_kind)
-                embeddings = self._split_native_embeddings(batch_embeddings, seqs)
+                    raw_embeddings_by_kind = model.embed_sequences(seqs)
+                embeddings_by_kind = self._derive_atlas_embeddings_by_kind(raw_embeddings_by_kind, seqs, model)
 
                 if self.sql:
-                    if self.matrix_embed:
-                        batch_rows = [
-                            (seq, tensor_to_embedding_blob(emb.to(self.embed_dtype)))
-                            for seq, emb in zip(seqs, embeddings)
-                        ]
-                    else:
-                        stacked = torch.stack([emb.to(self.embed_dtype) for emb in embeddings])
-                        blobs = batch_tensor_to_blobs(stacked)
-                        batch_rows = list(zip(seqs, blobs))
-                    sql_writer.write_batch(batch_rows)
+                    self._write_atlas_sql_batch(writers_by_kind, seqs, embeddings_by_kind)
                 else:
-                    for seq, emb in zip(seqs, embeddings):
-                        embeddings_dict[seq] = emb.to(self.embed_dtype)
+                    for embedding_kind, embeddings in embeddings_by_kind.items():
+                        kind_cache = embeddings_by_kind_cache.setdefault(embedding_kind, {})
+                        for seq, emb in zip(seqs, embeddings):
+                            kind_cache[seq] = emb.to(self.embed_dtype)
+                    embeddings_dict = embeddings_by_kind_cache[requested_kind]
         finally:
             if self.sql:
-                sql_writer.__exit__(None, None, None)
-                conn.close()
+                for writer in writers_by_kind.values():
+                    writer.__exit__(None, None, None)
+                for conn in conns_by_kind.values():
+                    conn.close()
 
         if not self.sql and self.save_embeddings:
-            print_message(f"Saving embeddings to {save_path}")
-            torch.save(embeddings_dict, save_path)
+            for embedding_kind, path in paths_by_kind.items():
+                print_message(f"Saving Atlas {embedding_kind} embeddings to {path}")
+                torch.save(embeddings_by_kind_cache[embedding_kind], path)
 
         return embeddings_dict
 
@@ -441,7 +605,8 @@ class Embedder:
             save_path: str,
             embedding_model: Any,
             tokenizer: Any,
-            embeddings_dict: Dict[str, torch.Tensor]) -> Optional[Dict[str, torch.Tensor]]:
+            embeddings_dict: Dict[str, torch.Tensor],
+            model_name: Optional[str] = None) -> Optional[Dict[str, torch.Tensor]]:
         os.makedirs(self.embedding_save_dir, exist_ok=True)
         if self._uses_native_atlas_embeddings(embedding_model):
             return self._embed_sequences_with_native_atlas(
@@ -449,6 +614,7 @@ class Embedder:
                 save_path,
                 embedding_model,
                 embeddings_dict,
+                model_name=model_name or 'Atlas-PPI-auto',
             )
 
         model = embedding_model.to(self.device).eval()
@@ -703,6 +869,12 @@ class Embedder:
         return embeddings_dict
 
     def __call__(self, model_name: str, model_type: str = None, model_path: str = None):
+        dispatch_name = model_type or model_name
+        if is_atlas_ppi_model_name(dispatch_name):
+            requested_kind = self._native_atlas_embedding_kind()
+            self.pooling_types = [requested_kind]
+            self.args.pooling_types = self.pooling_types
+
         if self.download_embeddings:
             self._download_embeddings(model_name)
 
@@ -712,7 +884,6 @@ class Embedder:
 
         if len(to_embed) > 0:
             print_message(f"Embedding {len(to_embed)} sequences with {model_name}")
-            dispatch_name = model_type or model_name
 
             n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
             if self.multi_gpu and n_gpus > 1 and not is_atlas_ppi_model_name(dispatch_name):
@@ -721,7 +892,14 @@ class Embedder:
                 )
             else:
                 model, tokenizer = get_base_model(dispatch_name, dtype=self.model_dtype, model_path=model_path)
-                return self._embed_sequences(to_embed, save_path, model, tokenizer, embeddings_dict)
+                return self._embed_sequences(
+                    to_embed,
+                    save_path,
+                    model,
+                    tokenizer,
+                    embeddings_dict,
+                    model_name=model_name,
+                )
         else:
             print_message(f"No sequences to embed with {model_name}")
             return embeddings_dict
