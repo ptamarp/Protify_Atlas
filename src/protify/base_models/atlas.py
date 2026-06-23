@@ -92,48 +92,20 @@ class AtlasPPIForEmbedding(nn.Module):
     def config(self):
         return self.model.config
 
-    def embed_sequences(self, sequences: List[str], embedding_kind: str = "pooled_concat"):
+    def embed_sequences(self, sequences: List[str], embedding_kind: Optional[str] = None):
+        if embedding_kind is None:
+            return self.model.embed_sequences(sequences)
         return self.model.embed_sequences(sequences, embedding_kind=embedding_kind)
 
     def embed_all_sequences(self, sequences: List[str]) -> Dict[str, torch.Tensor]:
-        """Return all Atlas embedding kinds from one native sequence-embedding pass.
-
-        The underlying Atlas implementation can produce ``concat`` embeddings in
-        one pass through its PLM encoder. The Protify embedder derives side-specific
-        and pooled variants from that shared output before writing cache files.
-        """
-        if hasattr(self.model, "embed_all_sequences"):
-            return self.model.embed_all_sequences(sequences)
-        concat = self.model.embed_sequences(sequences, embedding_kind="concat")
-        return self._derive_all_from_concat(concat)
-
-    def _derive_all_from_concat(self, concat):
-        a_input_size = self.config.a_input_size
-        b_input_size = self.config.b_input_size
-
-        if isinstance(concat, torch.Tensor):
-            a = concat[..., :a_input_size]
-            b = concat[..., a_input_size:a_input_size + b_input_size]
-            return {
-                "a": a,
-                "b": b,
-                "concat": concat,
-                "pooled_a": a.mean(dim=-2),
-                "pooled_b": b.mean(dim=-2),
-                "pooled_concat": concat.mean(dim=-2),
-            }
-
-        concat_list = [torch.as_tensor(embedding) for embedding in concat]
-        a_list = [embedding[..., :a_input_size] for embedding in concat_list]
-        b_list = [embedding[..., a_input_size:a_input_size + b_input_size] for embedding in concat_list]
-        return {
-            "a": a_list,
-            "b": b_list,
-            "concat": concat_list,
-            "pooled_a": [embedding.mean(dim=0) for embedding in a_list],
-            "pooled_b": [embedding.mean(dim=0) for embedding in b_list],
-            "pooled_concat": [embedding.mean(dim=0) for embedding in concat_list],
-        }
+        """Return all Atlas embedding kinds from one native sequence-embedding pass."""
+        embeddings = self.model.embed_sequences(sequences)
+        assert isinstance(embeddings, dict), (
+            "Atlas-PPI-auto embed_sequences(sequences) must return a dictionary of embedding views."
+        )
+        missing = set(ATLAS_EMBEDDING_KINDS) - set(embeddings)
+        assert not missing, f"Atlas embed_sequences did not return required views: {sorted(missing)}"
+        return embeddings
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)

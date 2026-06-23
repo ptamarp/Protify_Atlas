@@ -490,36 +490,20 @@ class Embedder:
             seqs: List[str],
             model: Any,
     ) -> Dict[str, List[torch.Tensor]]:
+        assert isinstance(raw_embeddings_by_kind, dict), (
+            "Atlas embed_sequences(sequences) must return a dictionary of all embedding views."
+        )
+        missing = set(ATLAS_EMBEDDING_KINDS) - set(raw_embeddings_by_kind)
+        assert not missing, f"Atlas embed_sequences did not return required views: {sorted(missing)}"
+
         normalized: Dict[str, List[torch.Tensor]] = {}
-        for embedding_kind, raw_embeddings in raw_embeddings_by_kind.items():
-            if embedding_kind in ATLAS_EMBEDDING_KINDS:
-                normalized[embedding_kind] = self._split_native_embeddings(
-                    raw_embeddings,
-                    seqs,
-                    matrix_embed=atlas_kind_is_matrix(embedding_kind),
-                )
-
-        if 'concat' not in normalized:
-            raw_concat = model.embed_sequences(seqs, embedding_kind='concat')
-            normalized['concat'] = self._split_native_embeddings(raw_concat, seqs, matrix_embed=True)
-
-        if 'a' not in normalized or 'b' not in normalized:
-            config = getattr(model, 'config', None)
-            a_input_size = getattr(config, 'a_input_size', None)
-            b_input_size = getattr(config, 'b_input_size', None)
-            assert a_input_size is not None and b_input_size is not None, (
-                "Atlas config must expose a_input_size and b_input_size to derive all embedding kinds."
+        for embedding_kind in ATLAS_EMBEDDING_KINDS:
+            normalized[embedding_kind] = self._split_native_embeddings(
+                raw_embeddings_by_kind[embedding_kind],
+                seqs,
+                matrix_embed=atlas_kind_is_matrix(embedding_kind),
             )
-            normalized['a'] = [emb[..., :a_input_size] for emb in normalized['concat']]
-            normalized['b'] = [emb[..., a_input_size:a_input_size + b_input_size] for emb in normalized['concat']]
-
-        # Recompute pooled variants after normalization/trimming so pooled caches
-        # never include padding that may have been present in a batched tensor.
-        normalized['pooled_a'] = [emb.mean(dim=0) for emb in normalized['a']]
-        normalized['pooled_b'] = [emb.mean(dim=0) for emb in normalized['b']]
-        normalized['pooled_concat'] = [emb.mean(dim=0) for emb in normalized['concat']]
-
-        return {embedding_kind: normalized[embedding_kind] for embedding_kind in ATLAS_EMBEDDING_KINDS}
+        return normalized
 
     def _open_atlas_sql_writers(self, paths_by_kind: Dict[str, str]) -> Tuple[Dict[str, sqlite3.Connection], Dict[str, _SQLWriter]]:
         conns = {}
@@ -589,12 +573,7 @@ class Embedder:
             for batch_start in tqdm(range(0, len(to_embed), self.batch_size), total=total_batches, desc='Embedding batches'):
                 seqs = to_embed[batch_start:batch_start + self.batch_size]
                 with torch.autocast(self.device.type, dtype=self.embed_dtype, enabled=self.autocast):
-                    if hasattr(model, 'embed_all_sequences'):
-                        raw_embeddings_by_kind = model.embed_all_sequences(seqs)
-                    else:
-                        raw_embeddings_by_kind = {
-                            'concat': model.embed_sequences(seqs, embedding_kind='concat'),
-                        }
+                    raw_embeddings_by_kind = model.embed_sequences(seqs)
                 embeddings_by_kind = self._derive_atlas_embeddings_by_kind(raw_embeddings_by_kind, seqs, model)
 
                 if self.sql:

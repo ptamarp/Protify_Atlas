@@ -30,17 +30,26 @@ class FakeAtlasModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(a_input_size=2, b_input_size=2)
-        self.embed_all_calls = 0
+        self.embed_sequences_calls = []
 
-    def embed_all_sequences(self, sequences):
-        self.embed_all_calls += 1
-        concat = []
+    def embed_sequences(self, sequences, embedding_kind=None):
+        self.embed_sequences_calls.append(embedding_kind)
+        assert embedding_kind is None
+        a, b, concat = [], [], []
         for sequence in sequences:
-            emb = torch.zeros(len(sequence) + 2, 4)
-            emb[:, :2] = float(len(sequence))
-            emb[:, 2:] = float(len(sequence) + 10)
-            concat.append(emb)
-        return {"concat": concat}
+            a_emb = torch.full((len(sequence), 2), float(len(sequence)))
+            b_emb = torch.full((len(sequence), 2), float(len(sequence) + 10))
+            a.append(a_emb)
+            b.append(b_emb)
+            concat.append(torch.cat([a_emb, b_emb], dim=-1))
+        return {
+            "a": a,
+            "b": b,
+            "concat": concat,
+            "pooled_a": torch.stack([embedding.mean(dim=0) for embedding in a]),
+            "pooled_b": torch.stack([embedding.mean(dim=0) for embedding in b]),
+            "pooled_concat": torch.stack([embedding.mean(dim=0) for embedding in concat]),
+        }
 
 
 def test_atlas_embedding_filename_uses_exact_native_kind():
@@ -81,7 +90,7 @@ def test_atlas_native_embedder_writes_all_pth_kinds_from_one_call(tmp_path):
         model_name="Atlas-PPI-auto",
     )
 
-    assert model.embed_all_calls == 1
+    assert model.embed_sequences_calls == [None]
     assert set(embeddings) == set(sequences)
     assert torch.equal(embeddings["MKT"], torch.tensor([3.0, 3.0, 13.0, 13.0]))
     for embedding_kind in ATLAS_EMBEDDING_KINDS:
@@ -117,7 +126,7 @@ def test_atlas_sql_embedder_writes_all_kind_databases_from_one_call(tmp_path):
         model_name="Atlas-PPI-auto",
     )
 
-    assert model.embed_all_calls == 1
+    assert model.embed_sequences_calls == [None]
     for embedding_kind in ATLAS_EMBEDDING_KINDS:
         path = tmp_path / get_atlas_embedding_filename("Atlas-PPI-auto", embedding_kind, extension="db")
         assert path.exists(), f"Missing Atlas database for {embedding_kind}"
