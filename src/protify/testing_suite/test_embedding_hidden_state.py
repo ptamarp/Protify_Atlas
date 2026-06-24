@@ -108,6 +108,55 @@ def test_parse_arguments_yaml_hidden_state_cli_override(tmp_path, monkeypatch):
     assert args.embedding_hidden_state_index == 4
 
 
+def test_parse_arguments_yaml_adds_use_xformers_default(tmp_path, monkeypatch):
+    from src.protify.main import parse_arguments
+
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(
+        "\n".join(
+            [
+                "data_names:",
+                "  - DeepLoc-2",
+                "model_names:",
+                "  - Atlas-PPI-auto",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "--yaml_path", str(yaml_path)])
+
+    args = parse_arguments()
+
+    assert args.use_xformers is False
+
+
+def test_parse_arguments_yaml_use_xformers_cli_override(tmp_path, monkeypatch):
+    from src.protify.main import parse_arguments
+
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(
+        "\n".join(
+            [
+                "data_names:",
+                "  - DeepLoc-2",
+                "model_names:",
+                "  - Atlas-PPI-auto",
+                "use_xformers: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["main.py", "--yaml_path", str(yaml_path), "--use_xformers"],
+    )
+
+    args = parse_arguments()
+
+    assert args.use_xformers is True
+
+
 def test_hyperopt_apply_config_updates_and_restores_embedding_args():
     main_process = SimpleNamespace(
         probe_args=SimpleNamespace(

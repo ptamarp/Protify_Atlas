@@ -397,6 +397,7 @@ def parse_arguments():
         yaml_args.codon_to_aa = _merge_store_true(args.codon_to_aa, "codon_to_aa")
         yaml_args.aa_to_codon = _merge_store_true(args.aa_to_codon, "aa_to_codon")
         yaml_args.random_pair_flipping = _merge_store_true(args.random_pair_flipping, "random_pair_flipping")
+        yaml_args.use_xformers = _merge_store_true(args.use_xformers, "use_xformers")
         yaml_args.push_raw_probe = _merge_store_true(args.push_raw_probe, "push_raw_probe")
         yaml_args.parallel_probe_runs = _merge_store_true(args.parallel_probe_runs, "parallel_probe_runs")
         if (args.parallel_probe_batch_mode != "shared") or ("parallel_probe_batch_mode" not in yaml_args.__dict__):
