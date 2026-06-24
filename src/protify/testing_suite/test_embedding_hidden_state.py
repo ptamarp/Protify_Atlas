@@ -128,6 +128,9 @@ def test_parse_arguments_yaml_adds_use_xformers_default(tmp_path, monkeypatch):
     args = parse_arguments()
 
     assert args.use_xformers is False
+    assert args.deterministic is False
+    assert args.data_dirs == []
+    assert args.model_paths is None
 
 
 def test_parse_arguments_yaml_use_xformers_cli_override(tmp_path, monkeypatch):

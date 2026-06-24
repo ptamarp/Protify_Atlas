@@ -304,7 +304,16 @@ def parse_arguments():
     if args.yaml_path is not None:
         with open(args.yaml_path, 'r') as file: 
             settings = yaml.safe_load(file)
+        if settings is None:
+            settings = {}
         yaml_args = SimpleNamespace(**settings)
+
+        # YAML configs often omit parser defaults. Populate every missing
+        # argparse key first, then let the explicit merge logic below preserve
+        # YAML values and apply CLI overrides where supported.
+        for key, value in args.__dict__.items():
+            if key not in yaml_args.__dict__:
+                yaml_args.__dict__[key] = value
 
         def _merge_store_true(cli_value: bool, key: str) -> bool:
             if cli_value:
@@ -483,16 +492,16 @@ if __name__ == "__main__":
     args = parse_arguments()
 
     # Require that either datasets are specified or a ProteinGym experiment is chosen
-    has_datasets = bool(args.data_names or args.data_dirs)
-    has_proteingym = bool(args.proteingym)
-    if not has_datasets and not has_proteingym and args.yaml_path is None:
+    has_datasets = bool(getattr(args, "data_names", None) or getattr(args, "data_dirs", None))
+    has_proteingym = bool(getattr(args, "proteingym", False))
+    if not has_datasets and not has_proteingym and getattr(args, "yaml_path", None) is None:
         raise AssertionError("No datasets specified. Provide --data_names or --data_dirs, or run a ProteinGym experiment.")
 
-    if args.use_xformers:
+    if getattr(args, "use_xformers", False):
         os.environ["_USE_XFORMERS"] = "1"
         print("xformers memory efficient attention enabled for AMPLIFY models")
 
-    if args.hf_home is not None:
+    if getattr(args, "hf_home", None) is not None:
         # Needs to happen before any HF imports
         import pathlib
         base_path = args.hf_home
@@ -512,7 +521,7 @@ if __name__ == "__main__":
 
     # Set global seed before doing anything else
     # If seed is None, set_global_seed will derive it from current time
-    if args.deterministic:
+    if getattr(args, "deterministic", False):
         from protify.seed_utils import set_determinism
         set_determinism()
     
